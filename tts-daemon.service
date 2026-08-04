@@ -1,0 +1,14 @@
+[Unit]
+Description=Piper TTS daemon (keeps a voice warm, speaks lines from a FIFO)
+After=pipewire.service wireplumber.service
+
+[Service]
+# Run under the pipx venv python (has piper); the user manager provides XDG_RUNTIME_DIR + the
+# dbus session, so paplay reaches the PipeWire default sink (your BT speaker). Set TTS_VOICES to
+# load more than the default (comma list).
+ExecStart=%h/.local/share/pipx/venvs/piper-tts/bin/python %h/.local/bin/tts_daemon.py
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
