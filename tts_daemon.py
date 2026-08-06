@@ -30,6 +30,11 @@ VOICE_DIR = os.path.expanduser("~/.local/share/piper")
 WANTED = [v.strip() for v in os.environ.get("TTS_VOICES", "en_US-amy-medium").split(",") if v.strip()]
 DEFAULT_VOICE = WANTED[0]
 FIFO = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "tts.fifo")
+# Silence written ahead of every utterance. Each line gets a fresh paplay, so the sink resumes
+# from idle and (on Bluetooth) the speaker unmutes its amp — anything played during that ramp is
+# lost, which eats the opening word. The lead-in absorbs it instead. Raise it if a speaker still
+# clips; TTS_LEAD_MS=0 disables. (This is per-utterance, so it also costs that much latency.)
+LEAD_IN_MS = int(os.environ.get("TTS_LEAD_MS", "400"))
 
 
 def load_voices():
@@ -53,6 +58,8 @@ def speak(voices, voice, text):
         ["paplay", "--raw", f"--rate={sr}", "--format=s16le", "--channels=1"],
         stdin=subprocess.PIPE)
     try:
+        if LEAD_IN_MS:
+            player.stdin.write(b"\x00\x00" * (sr * LEAD_IN_MS // 1000))   # s16le mono silence
         for chunk in v.synthesize(text):
             player.stdin.write(chunk.audio_int16_bytes)
     finally:

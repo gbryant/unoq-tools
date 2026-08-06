@@ -41,6 +41,22 @@ Any on-board program can speak by writing a line to the FIFO (`"text"` or
 `"voice-name:text"`) — that's the whole client contract, and the FIFO's
 existence signals a warm daemon.
 
+**Clipped first word?** Each utterance gets a fresh `paplay`, so the sink resumes
+from idle and a Bluetooth speaker unmutes its amp — anything played during that
+ramp is lost. The daemon writes **400 ms of silence** ahead of every line to
+absorb it. If your speaker still clips, give it more:
+
+```bash
+systemctl --user edit tts-daemon      # add:  [Service]
+                                      #       Environment=TTS_LEAD_MS=700
+systemctl --user restart tts-daemon
+```
+
+It's per-utterance latency as well as padding, so don't set it higher than the
+clipping actually needs. `TTS_LEAD_MS=0` disables it. See also the no-suspend
+drop-in in [docs/unoq-bluetooth-audio.md](docs/unoq-bluetooth-audio.md) §3b —
+that fixes the larger version of this problem (whole clips lost after 5 s idle).
+
 ## Bluetooth audio
 
 | Tool | What it does |
