@@ -43,8 +43,21 @@ existence signals a warm daemon.
 
 **Clipped first word?** Each utterance gets a fresh `paplay`, so the sink resumes
 from idle and a Bluetooth speaker unmutes its amp — anything played during that
-ramp is lost. The daemon writes **400 ms of silence** ahead of every line to
-absorb it. If your speaker still clips, give it more:
+ramp is lost. The daemon plays a **400 ms quiet tone** ahead of every line to
+absorb it, and prefetches Piper's first chunk so there's no silent gap between
+the tone and the speech.
+
+Both details matter, and both were found by capturing the sink monitor
+(`parecord --device=bluez_output.<MAC>.1.monitor`) rather than by ear:
+
+- **A tone, not silence.** The board was emitting the complete phrase while the
+  speaker reproduced only the tail — so the loss is downstream, and digital
+  silence carries no energy for an amp to wake on.
+- **No gap.** Streaming Piper's output directly left a 240 ms hole between tone
+  and speech while synthesis caught up — long enough for the amp to fall back
+  asleep, undoing the lead-in.
+
+If your speaker still clips, give it a longer runway:
 
 ```bash
 systemctl --user edit tts-daemon      # add:  [Service]
@@ -52,10 +65,15 @@ systemctl --user edit tts-daemon      # add:  [Service]
 systemctl --user restart tts-daemon
 ```
 
-It's per-utterance latency as well as padding, so don't set it higher than the
-clipping actually needs. `TTS_LEAD_MS=0` disables it. See also the no-suspend
-drop-in in [docs/unoq-bluetooth-audio.md](docs/unoq-bluetooth-audio.md) §3b —
-that fixes the larger version of this problem (whole clips lost after 5 s idle).
+To measure what it needs, speak `"one two three four five six seven eight"` and
+note the first number you hear cleanly — each is roughly 400 ms, so hearing
+"three" first means about 800 ms is being lost. `TTS_LEAD_LEVEL` (default 700 of
+32767) sets the tone's loudness and `TTS_LEAD_HZ` (220) its pitch; `TTS_LEAD_MS=0`
+disables the lead-in entirely.
+
+See also the no-suspend drop-in in
+[docs/unoq-bluetooth-audio.md](docs/unoq-bluetooth-audio.md) §3b — that fixes the
+larger version of this problem (whole clips lost after 5 s idle).
 
 ## Bluetooth audio
 

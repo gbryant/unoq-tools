@@ -18,8 +18,10 @@ Normally launched by the tts-daemon.service systemd --user unit (which provides 
 the dbus session so paplay reaches the default sink). Run it with the pipx venv python (has piper).
 """
 import atexit
+import math
 import os
 import signal
+import struct
 import subprocess
 import sys
 
@@ -30,11 +32,33 @@ VOICE_DIR = os.path.expanduser("~/.local/share/piper")
 WANTED = [v.strip() for v in os.environ.get("TTS_VOICES", "en_US-amy-medium").split(",") if v.strip()]
 DEFAULT_VOICE = WANTED[0]
 FIFO = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "tts.fifo")
-# Silence written ahead of every utterance. Each line gets a fresh paplay, so the sink resumes
-# from idle and (on Bluetooth) the speaker unmutes its amp — anything played during that ramp is
-# lost, which eats the opening word. The lead-in absorbs it instead. Raise it if a speaker still
-# clips; TTS_LEAD_MS=0 disables. (This is per-utterance, so it also costs that much latency.)
+# Lead-in played ahead of every utterance, to absorb the wake-up ramp that otherwise eats the
+# opening word. Each line gets a fresh paplay, so the sink resumes from idle and a Bluetooth
+# speaker unmutes its amp.
+#
+# It is a quiet TONE, not silence, and that distinction is the whole point: capturing the sink
+# monitor showed the board emitting the complete phrase while the speaker reproduced only the
+# tail, so the loss is downstream — and digital silence carries no energy for an amp to wake on.
+# The tone fades to zero so it doesn't click into the speech.
+#
+# TTS_LEAD_MS   length (0 disables; it's added latency as well as padding)
+# TTS_LEAD_LEVEL amplitude out of 32767 (0 = silence, the old behaviour)
+# TTS_LEAD_HZ   pitch — low enough to be unobtrusive, high enough for a small speaker to render
 LEAD_IN_MS = int(os.environ.get("TTS_LEAD_MS", "400"))
+LEAD_LEVEL = int(os.environ.get("TTS_LEAD_LEVEL", "700"))
+LEAD_HZ = int(os.environ.get("TTS_LEAD_HZ", "220"))
+
+
+def lead_in(sr):
+    """s16le mono wake-up lead-in at the voice's sample rate."""
+    n = sr * LEAD_IN_MS // 1000
+    if n <= 0:
+        return b""
+    if LEAD_LEVEL <= 0:
+        return b"\x00\x00" * n
+    return b"".join(
+        struct.pack("<h", int(LEAD_LEVEL * (1.0 - i / n) * math.sin(2 * math.pi * LEAD_HZ * i / sr)))
+        for i in range(n))
 
 
 def load_voices():
@@ -54,13 +78,22 @@ def load_voices():
 def speak(voices, voice, text):
     v = voices.get(voice) or voices.get(DEFAULT_VOICE) or next(iter(voices.values()))
     sr = v.config.sample_rate
+    # Pull the first chunk BEFORE opening the stream. Otherwise the lead-in finishes, paplay
+    # underruns while Piper is still synthesizing, and that gap of true silence lets the amp
+    # fall back asleep — undoing the lead-in. (Measured on the sink monitor: a 240 ms hole
+    # between tone and speech.) Synthesis runs faster than realtime, so once the first chunk
+    # is buffered the rest keeps ahead of playback and the stream stays continuous.
+    chunks = iter(v.synthesize(text))
+    first = next(chunks, None)
+    if first is None:
+        return
     player = subprocess.Popen(
         ["paplay", "--raw", f"--rate={sr}", "--format=s16le", "--channels=1"],
         stdin=subprocess.PIPE)
     try:
-        if LEAD_IN_MS:
-            player.stdin.write(b"\x00\x00" * (sr * LEAD_IN_MS // 1000))   # s16le mono silence
-        for chunk in v.synthesize(text):
+        player.stdin.write(lead_in(sr))
+        player.stdin.write(first.audio_int16_bytes)
+        for chunk in chunks:
             player.stdin.write(chunk.audio_int16_bytes)
     finally:
         player.stdin.close()
