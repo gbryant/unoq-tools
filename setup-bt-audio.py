@@ -5,15 +5,20 @@ driven from your host over adb. Scripts docs/unoq-bluetooth-audio.md.
 Just run it (no arguments). It inspects each step, shows the current state, and asks permission
 before changing anything — idempotent, safe to re-run (done steps show ✓ and are skipped).
 
-The board ships PipeWire + WirePlumber. The non-obvious headless gotcha this automates: on a
-board reached over adb/ssh (no active logind seat) WirePlumber won't start its bluez monitor, so
-a speaker "connects" but plays nothing — fixed by a seat-monitoring override (step 4). Pairing
-(step 7) is interactive: you put the speaker in pairing mode and pick it.
+The board ships PipeWire + WirePlumber. Two non-obvious gotchas this automates, both
+WirePlumber config drop-ins:
+  - seat fix   — on a board reached over adb/ssh (no active logind seat) WirePlumber won't
+                 start its bluez monitor, so a speaker "connects" but plays nothing.
+  - no-suspend — WirePlumber suspends an idle sink after 5 s; waking it re-establishes the
+                 A2DP stream, swallowing the start of short clips (and blinking the link
+                 LED on some speakers, which looks alarmingly like a dropped connection).
+Pairing is the last step and is interactive: put the speaker in pairing mode and pick it.
 
 Run setup-board.py first (this assumes the password is reset so sudo works).
 """
 import base64
 import getpass
+import time
 import subprocess
 import sys
 
@@ -33,6 +38,26 @@ SEAT_CONF_BODY = (
     "    monitor.bluez.seat-monitoring = disabled\n"
     "  }\n"
     "}\n"
+)
+
+SUSPEND_CONF = SEAT_DIR + "/52-bluez-no-suspend.conf"
+SUSPEND_CONF_BODY = (
+    "# Voice output: don't idle-suspend the Bluetooth sink. WirePlumber suspends an idle\n"
+    "# node after 5 s (scripts/node/suspend-node.lua); waking it re-establishes the A2DP\n"
+    "# stream, which takes long enough to swallow the start of a short utterance -- and\n"
+    "# makes some speakers blink their link LED as if re-pairing. 0 disables the timer.\n"
+    "monitor.bluez.rules = [\n"
+    "  {\n"
+    "    matches = [\n"
+    '      { node.name = "~bluez_output.*" }\n'
+    "    ]\n"
+    "    actions = {\n"
+    "      update-props = {\n"
+    "        session.suspend-timeout-seconds = 0\n"
+    "      }\n"
+    "    }\n"
+    "  }\n"
+    "]\n"
 )
 
 
@@ -150,28 +175,55 @@ def step_bashrc():
     print("  added ✓")
 
 
-def seat_conf_present():
-    return sh(f'test -f {SEAT_CONF} && echo yes') == "yes"
+def conf_present(path):
+    return sh(f'test -f {path} && echo yes') == "yes"
+
+
+def write_conf(path, body):
+    # base64 the body so no shell quoting/tilde issues; decode on the board.
+    b64 = base64.b64encode(body.encode()).decode()
+    sh(f"mkdir -p {SEAT_DIR}")
+    sh(f"sh -c 'echo {b64} | base64 -d > {path}'")
+    return conf_present(path)
 
 
 def step_seat():
-    if seat_conf_present():
+    """Returns True if it changed something (so we know to restart WirePlumber)."""
+    if conf_present(SEAT_CONF):
         print("seat fix   : present ✓")
-    else:
-        print("seat fix   : MISSING — the headless killer (no A2DP without it)")
-        if not ask("  write the seat-monitoring override?"):
-            return
-        # base64 the body so no shell quoting/tilde issues; decode on the board.
-        b64 = base64.b64encode(SEAT_CONF_BODY.encode()).decode()
-        sh(f"mkdir -p {SEAT_DIR}")
-        sh(f"sh -c 'echo {b64} | base64 -d > {SEAT_CONF}'")
-        print("  written ✓" if seat_conf_present() else "  write FAILED")
-    # restart wireplumber so the override takes effect, then check A2DP is registered
-    if ask("  restart wireplumber and check A2DP now?"):
-        usr("systemctl --user restart wireplumber")
-        audio = usr("bluetoothctl show | grep -iE 'Audio Source|Audio Sink'")
-        print("  A2DP registered ✓" if "Audio" in audio
-              else "  A2DP still absent — check the override + WirePlumber log")
+        return False
+    print("seat fix   : MISSING — the headless killer (no A2DP without it)")
+    if not ask("  write the seat-monitoring override?"):
+        return False
+    ok = write_conf(SEAT_CONF, SEAT_CONF_BODY)
+    print("  written ✓" if ok else "  write FAILED")
+    return ok
+
+
+def step_suspend():
+    if conf_present(SUSPEND_CONF):
+        print("no-suspend : present ✓")
+        return False
+    print("no-suspend : MISSING — WirePlumber suspends an idle sink after 5 s. Waking it")
+    print("             re-establishes the A2DP stream, which swallows the start of a")
+    print("             short clip (and blinks the link LED on some speakers).")
+    if not ask("  write the no-idle-suspend override?"):
+        return False
+    ok = write_conf(SUSPEND_CONF, SUSPEND_CONF_BODY)
+    print("  written ✓" if ok else "  write FAILED")
+    return ok
+
+
+def step_wireplumber(changed):
+    if changed:
+        print("wireplumber: restarting to apply the override(s)")
+    elif not ask("\nrestart wireplumber and re-check A2DP?", default=False):
+        return
+    usr("systemctl --user restart wireplumber")
+    time.sleep(3)
+    audio = usr("bluetoothctl show | grep -iE 'Audio Source|Audio Sink'")
+    print("  A2DP registered ✓" if "Audio" in audio
+          else "  A2DP still absent — check the overrides + WirePlumber log")
 
 
 def step_pair():
@@ -194,7 +246,9 @@ def main():
     step_linger()
     step_bt_service()   # must precede seat/pair — bluetoothctl hangs if the daemon is down
     step_bashrc()
-    step_seat()
+    changed = step_seat()
+    changed = step_suspend() or changed
+    step_wireplumber(changed)
     step_pair()
     print("\ndone. Daily: `bt.py connect` to reconnect the speaker; `volume.py` to adjust volume.")
 

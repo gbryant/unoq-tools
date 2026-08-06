@@ -145,6 +145,54 @@ bluetoothctl show | grep -iE "Audio Source|Audio Sink"
   creates the `api.bluez5.enum.dbus` device (capture with
   `WIREPLUMBER_DEBUG=D wireplumber` while the service is stopped).
 
+### 3b. Stop the sink idle-suspending (fixes clipped/missing speech)
+
+A second WirePlumber drop-in, and the one you want if you're using the board for **voice
+output**. WirePlumber suspends an idle node after 5 s (`scripts/node/suspend-node.lua`).
+Waking it tears back up the A2DP stream, and that handshake takes long enough to swallow the
+beginning of a short utterance — so a two-word announcement can come out clipped, or seem not
+to play at all.
+
+The giveaway that fooled us: **some speakers blink their link LED during A2DP stream setup**,
+exactly like pairing mode, which looks alarmingly like the Bluetooth connection is dropping.
+It isn't — the ACL link stays up the whole time. Only the audio stream is being rebuilt.
+Confirm by watching both at once while something plays:
+
+```bash
+bluetoothctl devices Connected            # stays connected throughout
+pactl list sinks short | grep bluez       # SUSPENDED -> RUNNING is the real event
+```
+
+Create `~/.config/wireplumber/wireplumber.conf.d/52-bluez-no-suspend.conf`:
+
+```
+monitor.bluez.rules = [
+  {
+    matches = [
+      { node.name = "~bluez_output.*" }
+    ]
+    actions = {
+      update-props = {
+        session.suspend-timeout-seconds = 0
+      }
+    }
+  }
+]
+```
+
+`0` disables the timer outright (the script returns early rather than arming it). Restart
+WirePlumber, then confirm the sink settles to `IDLE` and *stays* there instead of dropping to
+`SUSPENDED` after five seconds:
+
+```bash
+systemctl --user restart wireplumber
+pactl list sinks | grep session.suspend-timeout-seconds   # -> "0"
+espeak-ng "test"; sleep 10; pactl list sinks short | grep bluez   # -> IDLE, not SUSPENDED
+```
+
+Cost: the A2DP stream stays open, so the speaker never idles down on its own. That's the
+trade you want for a voice-announcement board, but it will keep a battery speaker awake.
+
 ---
 
 ## 4. Pairing (one-time per speaker)
@@ -197,7 +245,8 @@ pactl list sinks short | grep bluez  # bluez_output.<MAC>.1  ...  RUNNING while 
 wpctl status                         # a Bluetooth device shows under Audio
 ```
 
-`SUSPENDED` when idle is normal; the sink flips to `RUNNING` during playback.
+The sink flips to `RUNNING` during playback. At rest you want **`IDLE`** — if it reads
+`SUSPENDED`, the no-suspend drop-in (§3b) isn't in effect, and short clips will get clipped.
 
 ---
 
@@ -208,12 +257,16 @@ wpctl status                         # a Bluetooth device shows under Audio
    `bluetoothctl show | grep Audio` (no Audio Source/Sink = monitor not running).
 2. **A fresh shell plays nothing / `pactl: Connection refused`** → env vars not set → put them in
    `~/.bashrc` (§2).
-3. **First sound after idle gets swallowed** → PipeWire suspends idle sinks and the speaker amp
-   sleeps; the opening burst wakes both and is lost. Play a throwaway wake burst first:
+3. **First sound after idle gets swallowed / short clips don't play / the link LED blinks like
+   it's re-pairing** → the sink is idle-suspending and the A2DP stream is being rebuilt per
+   utterance. **Fix it properly with the no-suspend drop-in (§3b)**; check with
+   `pactl list sinks short | grep bluez` (want `IDLE` at rest, not `SUSPENDED`).
+   If you can't apply the drop-in, the old workaround was a throwaway wake burst first:
    ```bash
    paplay /usr/share/sounds/alsa/Front_Center.wav 2>/dev/null; sleep 0.5; espeak-ng "the real message"
    ```
-   (It's not a fault — the *next* sound is fine because everything is now warm.)
+   Note a *battery* speaker may still sleep its own amp on idle regardless — that's the
+   speaker's own timer, not PipeWire's, and only it can be told not to.
 4. **Audio goes to onboard `Headphones` instead of the speaker** → make the bluez sink default:
    `pactl set-default-sink bluez_output.<MAC>.1` (or `wpctl set-default <id>`).
 5. **Erratic audio, server identity flip-flops** → both PulseAudio *and* PipeWire installed and
