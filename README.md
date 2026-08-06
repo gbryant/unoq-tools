@@ -46,8 +46,36 @@ existence signals a warm daemon.
 | Tool | What it does |
 |------|--------------|
 | `setup-bt-audio.py` | wizard for headless BT audio: PipeWire-first, pairing, auto-reconnect |
-| `bt.py` | connect / pair / report BT audio devices |
+| `bt.py` | connect / pair / forget / report BT audio devices |
 | `volume.py` | report or set the default sink's volume |
+
+Run `setup-bt-audio.py` once per board — it installs the packages and applies the
+headless gotcha this whole thing exists for: with no active logind seat, WirePlumber
+won't start its bluez monitor, so a speaker connects but plays nothing.
+
+After that `bt.py` is the daily tool:
+
+```bash
+./bt.py                 # what's paired, what's connected, the default sink
+./bt.py connect         # reconnect a speaker that idle-disconnected
+./bt.py pair            # scan, pick, pair+trust+connect, set default, speak a test word
+./bt.py pair --diff     # can't tell which entry is yours? see below
+./bt.py forget [MAC]    # drop a pairing so it stops auto-reconnecting
+```
+
+**`pair --diff`** is for a speaker you can't pick out of the list — a brandless one
+advertising a bare MAC, or a busy RF neighbourhood where a scan returns a dozen
+entries. It scans with the speaker **off** to take a baseline, scans again with it
+**on**, and offers only the difference. Usually that's exactly one device, so there's
+nothing to identify by eye.
+
+If the diff comes back empty, the speaker was probably already in BlueZ's cache from
+an earlier scan — a cached device is in the baseline too, so the difference can't
+reveal it. The tool says so and falls back to the full unpaired list; `bt.py forget`
+clears a stale entry.
+
+When you **swap** speakers, forget the old one. A paired device stays *trusted*, so it
+can wake up, auto-reconnect, and take the default sink back mid-test.
 
 ## Prerequisites
 

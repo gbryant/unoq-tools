@@ -9,6 +9,12 @@ setup-bt-audio.py calls for its last step.
   bt.py connect [MAC]   connect (no MAC → the lone paired device, else pick) + make it default
   bt.py disconnect [MAC]
   bt.py pair            scan, pick a new speaker, pair+trust+connect, set default + test
+  bt.py pair --diff     two scans (speaker off, then on) — pick from ONLY what appeared
+  bt.py forget [MAC]    disconnect + remove a pairing, so it can't auto-reconnect
+
+`pair --diff` is for the speaker whose name you can't recognise — a brandless one advertising
+a bare MAC, or a crowded RF neighbourhood. It scans once with the speaker off to take a
+baseline, once with it on, and offers the difference. Nothing to identify by eye.
 
 Needs the board reachable over adb and `bluetooth.service` running (setup-bt-audio.py enables it).
 """
@@ -65,11 +71,17 @@ def default_sink():
 
 
 # ── operations ───────────────────────────────────────────────────────────────
-def _pick(devs, what="device"):
+def _pick(devs, what="device", confirm=False):
+    """confirm=True: show a lone candidate and ask, instead of selecting it silently —
+    worth it when the action is destructive-ish (pairing) rather than routine."""
     if not devs:
         return None
     if len(devs) == 1:
-        return devs[0][0]
+        mac, name = devs[0]
+        if confirm:
+            print(f"  found: {name} [{mac}]")
+            return mac if ask("  pair with this?") else None
+        return mac
     print(f"  multiple {what}s:")
     for i, (m, n) in enumerate(devs):
         print(f"    {i}) {n} [{m}]")
@@ -132,23 +144,85 @@ def cmd_disconnect(mac=None):
     print(f"  disconnected {mac} ✓" if "successful" in out.lower() else f"  {out.splitlines()[-1] if out else '?'}")
 
 
-def cmd_pair():
-    print("  put the speaker in pairing mode, then scanning 15 s...")
+SCAN_SECS = 15
+
+
+def bt_service_up():
+    """bluetoothctl HANGS (not errors) when bluetoothd is down, so every call would just
+    time out with no clue why. setup-bt-audio.py checks this before pairing; standalone
+    runs need it too."""
+    if usr("systemctl is-active bluetooth", timeout=10) == "active":
+        return True
+    print("  bluetooth.service isn't active — BT commands would just time out.\n"
+          "  Fix: run setup-bt-audio.py (it enables the service), or\n"
+          "       adb shell sudo systemctl enable --now bluetooth")
+    return False
+
+
+def _scan(secs=SCAN_SECS):
+    """Discovery pass; returns [(mac, name), ...] known to BlueZ afterwards."""
     usr("bluetoothctl power on")
-    usr("bluetoothctl --timeout 15 scan on", timeout=30)
-    devs = _devices("")            # all discovered
-    if devs:
-        print("  discovered:")
-        for m, n in devs:
-            print(f"    {n} [{m}]")
-    mac = input("  speaker MAC (AA:BB:CC:DD:EE:FF): ").strip()
+    usr(f"bluetoothctl --timeout {secs} scan on", timeout=secs + 15)
+    return _devices("")
+
+
+def _candidates_plain(paired):
+    print(f"  put the speaker in pairing mode, then scanning {SCAN_SECS} s...")
+    return [(m, n) for m, n in _scan() if m not in paired]
+
+
+def _candidates_diff(paired):
+    """Two scans bracketing the speaker being switched on; the new speaker is the set
+    difference. Identifies a device you can't recognise by name."""
+    input(f"  1/2 — make sure the speaker is OFF, then press Enter (scans {SCAN_SECS} s)...")
+    before = {m for m, _ in _scan()}
+    print(f"       baseline: {len(before)} device(s) in range")
+    input("  2/2 — now switch the speaker ON / into pairing mode, then press Enter...")
+    after = _scan()
+    new = [(m, n) for m, n in after if m not in before and m not in paired]
+    if new:
+        return new
+    print("  nothing new appeared. Either the speaker isn't in pairing mode or is out of\n"
+          "  range, or BlueZ already had it cached from an earlier scan — a cached device\n"
+          "  is in the baseline too, so the difference can't reveal it. Showing everything\n"
+          "  unpaired instead; `bt.py forget` clears a stale entry if you spot one.")
+    return [(m, n) for m, n in after if m not in paired]
+
+
+def cmd_pair(diff=False):
+    if not bt_service_up():
+        return
+    paired = {m for m, _ in _devices("Paired")}
+    cands = _candidates_diff(paired) if diff else _candidates_plain(paired)
+    if not cands:
+        print("  no unpaired devices found — is the speaker in pairing mode?")
+        return
+    if not diff and len(cands) > 4:
+        print(f"  ({len(cands)} candidates — `bt.py pair --diff` narrows this to the one you"
+              " just switched on)")
+    mac = _pick(cands, "candidate", confirm=True)
     if not mac:
+        print("  nothing selected.")
         return
     for action in ("pair", "trust", "connect"):
         out = usr(f"bluetoothctl {action} {shlex.quote(mac)}", timeout=25)
         ok = action == "trust" or "successful" in out.lower()
         print(f"  {action:<8} {'✓' if ok else (out.splitlines()[-1] if out else '?')}")
     make_default(mac, announce=True)
+
+
+def cmd_forget(mac=None):
+    """Remove a pairing. A paired device stays *trusted*, so it can auto-reconnect and take
+    the default sink back — forget the old speaker when you swap."""
+    if not mac:
+        mac = _pick(_devices("Paired"), "paired device")
+        if not mac:
+            print("nothing paired to forget")
+            return
+    usr(f"bluetoothctl disconnect {shlex.quote(mac)}", timeout=20)
+    out = usr(f"bluetoothctl remove {shlex.quote(mac)}", timeout=20)
+    print(f"  forgot {mac} ✓" if "removed" in out.lower()
+          else f"  {out.splitlines()[-1] if out else '?'}")
 
 
 def main():
@@ -158,8 +232,12 @@ def main():
     if not have_board():
         sys.exit("no adb device — plug the Uno Q in over USB")
 
-    cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
-    arg = sys.argv[2] if len(sys.argv) > 2 else None
+    args = sys.argv[1:]
+    diff = bool({"--diff", "-d"} & set(args))
+    args = [a for a in args if a not in ("--diff", "-d")]
+
+    cmd = args[0] if args else "status"
+    arg = args[1] if len(args) > 1 else None
     if cmd == "status":
         cmd_status()
     elif cmd == "connect":
@@ -167,7 +245,9 @@ def main():
     elif cmd == "disconnect":
         cmd_disconnect(arg)
     elif cmd == "pair":
-        cmd_pair()
+        cmd_pair(diff)
+    elif cmd == "forget":
+        cmd_forget(arg)
     else:
         sys.exit(f"unknown command '{cmd}' — see `bt.py --help`")
 
