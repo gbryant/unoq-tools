@@ -109,6 +109,8 @@ def make_default(mac, announce=False):
 
 
 def cmd_status():
+    if not bt_ready():
+        return
     conn = {m for m, _ in _devices("Connected")}
     paired = _devices("Paired")
     if not paired:
@@ -121,6 +123,8 @@ def cmd_status():
 
 
 def cmd_connect(mac=None):
+    if not bt_ready():
+        return
     if not mac:
         mac = _pick(_devices("Paired"), "paired device")
         if not mac:
@@ -147,16 +151,44 @@ def cmd_disconnect(mac=None):
 SCAN_SECS = 15
 
 
-def bt_service_up():
-    """bluetoothctl HANGS (not errors) when bluetoothd is down, so every call would just
-    time out with no clue why. setup-bt-audio.py checks this before pairing; standalone
-    runs need it too."""
-    if usr("systemctl is-active bluetooth", timeout=10) == "active":
-        return True
-    print("  bluetooth.service isn't active — BT commands would just time out.\n"
-          "  Fix: run setup-bt-audio.py (it enables the service), or\n"
-          "       adb shell sudo systemctl enable --now bluetooth")
-    return False
+def adapter_state():
+    """(present, powered) from `bluetoothctl show`."""
+    out = usr("bluetoothctl show", timeout=15)
+    if not out or "No default controller" in out:
+        return False, False
+    return True, "Powered: yes" in out
+
+
+def bt_ready():
+    """Everything below the pairing flow that has to be true first. Worth checking
+    explicitly: when the controller is down, BlueZ doesn't error usefully — it reports an
+    EMPTY paired list (so paired speakers look unpaired and re-pairing seems reasonable)
+    and then fails with AuthenticationFailed. The real cause is invisible without dmesg."""
+    if usr("systemctl is-active bluetooth", timeout=10) != "active":
+        print("  bluetooth.service isn't active — BT commands would just time out.\n"
+              "  Fix: run setup-bt-audio.py (it enables the service), or\n"
+              "       adb shell sudo systemctl enable --now bluetooth")
+        return False
+
+    present, powered = adapter_state()
+    if not present:
+        print("  no Bluetooth controller found (`bluetoothctl show` has no adapter).")
+        return False
+    if not powered:
+        usr("bluetoothctl power on", timeout=15)      # normal case: just powered down
+        _, powered = adapter_state()
+    if not powered:
+        print("  the Bluetooth controller is DOWN and refuses to power on.\n"
+              "  Most likely the QCA SoC crashed — a stalled speaker link can take it out,\n"
+              "  and its firmware-reload recovery sometimes times out too. Confirm with:\n"
+              '    adb shell "dmesg | grep -i hci | tail"\n'
+              "  ('crash the soc' / 'Change address cmd failed' / bluetoothd 'Invalid Index').\n"
+              "  Recovery is a board reboot — power-cycling the UART-attached chip:\n"
+              "    adb reboot\n"
+              "  NOTE: while it's down BlueZ reports NO paired devices, so anything you had\n"
+              "  paired will look unpaired. Don't re-pair; reboot first.")
+        return False
+    return True
 
 
 def _scan(secs=SCAN_SECS):
@@ -190,7 +222,7 @@ def _candidates_diff(paired):
 
 
 def cmd_pair(diff=False):
-    if not bt_service_up():
+    if not bt_ready():
         return
     paired = {m for m, _ in _devices("Paired")}
     cands = _candidates_diff(paired) if diff else _candidates_plain(paired)
