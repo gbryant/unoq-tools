@@ -1,0 +1,13 @@
+[Unit]
+Description=Bluetooth speaker auto-connect (dial out until the speaker is linked)
+After=bluetooth.service
+
+[Service]
+# System python — no dependencies beyond bluetoothctl. The user manager provides the session
+# bus; BlueZ ops need no sudo. Set the speaker with a drop-in (bt.py autoconnect on <MAC>).
+ExecStart=/usr/bin/python3 %h/.local/bin/bt_autoconnect.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

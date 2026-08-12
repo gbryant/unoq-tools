@@ -251,6 +251,8 @@ def main():
     step_wireplumber(changed)
     step_pair()
     print("\ndone. Daily: `bt.py connect` to reconnect the speaker; `volume.py` to adjust volume.")
+    print("For a headless board that boots with no computer attached, make that automatic:")
+    print("  bt.py autoconnect on <MAC>   (dials the speaker itself, at boot and after drops)")
 
 
 if __name__ == "__main__":

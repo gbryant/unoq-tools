@@ -11,19 +11,34 @@ setup-bt-audio.py calls for its last step.
   bt.py pair            scan, pick a new speaker, pair+trust+connect, set default + test
   bt.py pair --diff     two scans (speaker off, then on) — pick from ONLY what appeared
   bt.py forget [MAC]    disconnect + remove a pairing, so it can't auto-reconnect
+  bt.py autoconnect on <MAC> | off | status
+                        keep a speaker connected from the board itself — for a headless
+                        board that boots with no computer attached (see below)
 
 `pair --diff` is for the speaker whose name you can't recognise — a brandless one advertising
 a bare MAC, or a crowded RF neighbourhood. It scans once with the speaker off to take a
 baseline, once with it on, and offers the difference. Nothing to identify by eye.
 
+`autoconnect` is what makes a board standalone. Pairing survives a reboot but a *connection*
+doesn't, and `Trusted: yes` only lets the speaker dial IN — nothing on the board dials OUT, so
+after a power cycle a paired speaker sits idle and the board is mute until someone runs
+`bt.py connect` from a computer. `autoconnect on <MAC>` installs a board-side loop that dials
+out until the speaker answers, so power alone is enough. It also handles switching the speaker
+on after the board, and re-links one that idle-drops.
+
 Needs the board reachable over adb and `bluetooth.service` running (setup-bt-audio.py enables it).
 """
+import base64
+import os
 import shlex
 import subprocess
 import sys
 import time
 
 UENV = 'XDG_RUNTIME_DIR=/run/user/$(id -u) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus'
+HERE = os.path.dirname(os.path.abspath(__file__))     # repo root — the loop + unit live here
+AC_UNIT = "bt-autoconnect.service"
+AC_DROPIN_DIR = "$HOME/.config/systemd/user/bt-autoconnect.service.d"
 
 
 # ── board I/O (timeout-bounded — bluetoothctl hangs if the daemon is down) ───
@@ -136,6 +151,61 @@ def cmd_connect(mac=None):
         make_default(mac)
     else:
         print(f"  connect failed: {out.splitlines()[-1] if out else '?'}")
+
+
+# ── auto-connect (headless / appliance) ──────────────────────────────────────
+# Pairing survives a reboot, a connection doesn't, and `Trusted: yes` only authorises the
+# speaker to dial IN — so a board that boots with nobody at a keyboard stays mute. This runs a
+# board-side loop that dials OUT until the speaker answers.
+def _sh(cmd, timeout=20):
+    p = subprocess.run(["adb", "shell", cmd], capture_output=True, text=True, timeout=timeout)
+    return p.stdout.strip()
+
+
+def _sc(args, timeout=20):
+    return usr(f"systemctl --user {args}", timeout=timeout)
+
+
+def autoconnect_mac():
+    """The MAC the board is configured to dial, from the unit's drop-in."""
+    for tok in _sc("show -p Environment --value bt-autoconnect").split():
+        if tok.startswith("BT_AUTOCONNECT_MAC="):
+            return tok.split("=", 1)[1]
+    return ""
+
+
+def cmd_autoconnect(action=None, mac=None):
+    if action in (None, "status"):
+        active = _sc("is-active bt-autoconnect")
+        target = autoconnect_mac()
+        print(f"autoconnect : {active} / {_sc('is-enabled bt-autoconnect')}"
+              f"{f'   {target}' if target else '   (no MAC set)'}")
+        return
+    if action == "off":
+        _sc(f"disable --now {AC_UNIT}")
+        print("autoconnect off ✓ (reconnect by hand with `bt.py connect`)")
+        return
+    if action != "on":
+        sys.exit("usage: bt.py autoconnect [status|on <MAC>|off]")
+
+    if not mac:
+        mac = _pick(_devices("Paired"), "paired device")
+        if not mac:
+            sys.exit("no paired device to auto-connect — run `bt.py pair` first")
+    _sh("mkdir -p ~/.local/bin ~/.config/systemd/user")
+    subprocess.run(["adb", "push", os.path.join(HERE, "bt_autoconnect.py"),
+                    "/home/arduino/.local/bin/bt_autoconnect.py"], capture_output=True)
+    subprocess.run(["adb", "push", os.path.join(HERE, AC_UNIT),
+                    f"/home/arduino/.config/systemd/user/{AC_UNIT}"], capture_output=True)
+    _sh("chmod +x ~/.local/bin/bt_autoconnect.py")
+    body = f"[Service]\nEnvironment=BT_AUTOCONNECT_MAC={mac}\n"
+    b64 = base64.b64encode(body.encode()).decode()
+    _sh(f"mkdir -p {AC_DROPIN_DIR}")
+    _sh(f"sh -c 'echo {b64} | base64 -d > {AC_DROPIN_DIR}/mac.conf'")
+    _sc("daemon-reload")
+    _sc(f"enable --now {AC_UNIT}")
+    print(f"autoconnect on ✓ — the board will keep {mac} connected by itself,")
+    print("  including after a reboot with no computer attached.")
 
 
 def cmd_disconnect(mac=None):
@@ -278,6 +348,8 @@ def main():
         cmd_disconnect(arg)
     elif cmd == "pair":
         cmd_pair(diff)
+    elif cmd == "autoconnect":
+        cmd_autoconnect(arg, args[2] if len(args) > 2 else None)
     elif cmd == "forget":
         cmd_forget(arg)
     else:

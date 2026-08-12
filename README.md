@@ -96,8 +96,9 @@ larger version of this problem (whole clips lost after 5 s idle).
 
 | Tool | What it does |
 |------|--------------|
-| `setup-bt-audio.py` | wizard for headless BT audio: PipeWire-first, pairing, auto-reconnect |
-| `bt.py` | connect / pair / forget / report BT audio devices |
+| `setup-bt-audio.py` | wizard for headless BT audio: PipeWire-first, pairing |
+| `bt.py` | connect / pair / forget / report BT audio devices; `bt.py autoconnect on <MAC>` keeps one connected |
+| `bt_autoconnect.py` | the board-side dial-out loop (`bt-autoconnect.service`) |
 | `volume.py` | report or set the default sink's volume |
 
 Run `setup-bt-audio.py` once per board — it installs the packages and applies the
@@ -112,6 +113,8 @@ After that `bt.py` is the daily tool:
 ./bt.py pair            # scan, pick, pair+trust+connect, set default, speak a test word
 ./bt.py pair --diff     # can't tell which entry is yours? see below
 ./bt.py forget [MAC]    # drop a pairing so it stops auto-reconnecting
+./bt.py autoconnect on <MAC>   # the board keeps it connected by itself (see below)
+./bt.py autoconnect off | status
 ```
 
 **`pair --diff`** is for a speaker you can't pick out of the list — a brandless one
@@ -127,6 +130,23 @@ clears a stale entry.
 
 When you **swap** speakers, forget the old one. A paired device stays *trusted*, so it
 can wake up, auto-reconnect, and take the default sink back mid-test.
+
+**`autoconnect`** is what makes a board standalone — one that boots on a wall socket
+with no computer attached. Pairing survives a reboot but a **connection doesn't**, and
+`Trusted: yes` only authorises the speaker to dial *in*: nothing on the board dials
+*out*, so after a power cycle a paired, trusted speaker sits idle and the board is
+mute until someone runs `bt.py connect`. `autoconnect on <MAC>` installs a board-side
+loop (a `systemd --user` unit, so linger runs it with nobody logged in) that dials out
+until the speaker answers, then keeps checking — so it also handles switching the
+speaker on *after* the board, and re-links one that idle-drops.
+
+```bash
+./bt.py autoconnect on 41:42:9D:48:82:BF
+./bt.py autoconnect                       # active/enabled + the MAC it's dialling
+adb shell 'journalctl --user -u bt-autoconnect -f'
+```
+
+It logs only transitions, so the journal stays readable across days of uptime.
 
 ## Prerequisites
 
