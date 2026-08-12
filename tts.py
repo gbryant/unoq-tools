@@ -14,6 +14,11 @@ Daemon (so you never type a systemctl incantation):
   tts.py daemon voice <name|both>      # repoint the warm voice, restart
   tts.py daemon logs
 
+Keep-alive (a sub-audible floor so the speaker's amp never sleeps mid-sentence):
+  tts.py keepalive                     # status
+  tts.py keepalive on | off            # toggle (instant — separate from the warm daemon)
+  tts.py keepalive level <n>           # floor amplitude out of 32767 (default 20)
+
 Health:
   tts.py doctor                        # audit the whole chain + print fixes
 
@@ -34,6 +39,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))     # repo root — daemon + u
 UNIT = "tts-daemon.service"
 DROPIN_DIR = "$HOME/.config/systemd/user/tts-daemon.service.d"
 DEFAULT_VOICE = "en_US-amy-medium"
+KA_UNIT = "tts-keepalive.service"
+KA_DROPIN_DIR = "$HOME/.config/systemd/user/tts-keepalive.service.d"
+DEFAULT_KA_LEVEL = 20
 
 
 # ── board I/O ────────────────────────────────────────────────────────────────
@@ -144,6 +152,11 @@ def daemon_install():
     sh("chmod +x ~/.local/bin/tts_daemon.py")
     sc("daemon-reload")
     sc(f"enable {UNIT} >/dev/null 2>&1")
+    # On by default: without it a Bluetooth speaker's amp sleeps between utterances and swallows
+    # the first word or so. `tts.py keepalive off` if you'd rather let the speaker idle down.
+    keepalive_install()
+    sc(f"enable --now {KA_UNIT} >/dev/null 2>&1")
+    print(f"  keep-alive floor on (level {keepalive_level()}) — tts.py keepalive off to stop it")
     print("  loading voice (~10 s)...")
     ok = restart_and_wait()
     print("  daemon ready ✓ — tts.py is now instant" if ok
@@ -153,8 +166,10 @@ def daemon_install():
 
 def daemon_uninstall():
     sc(f"disable --now {UNIT} >/dev/null 2>&1")
+    sc(f"disable --now {KA_UNIT} >/dev/null 2>&1")
     sh("rm -f ~/.config/systemd/user/tts-daemon.service ~/.local/bin/tts_daemon.py")
-    sh(f"rm -rf {DROPIN_DIR}")
+    sh("rm -f ~/.config/systemd/user/tts-keepalive.service ~/.local/bin/tts_keepalive.py")
+    sh(f"rm -rf {DROPIN_DIR} {KA_DROPIN_DIR}")
     sc("daemon-reload")
     sh(f"rm -f {FIFO}")
     print("daemon removed ✓")
@@ -164,13 +179,17 @@ def daemon_uninstall():
         print("piper-tts + voices removed ✓")
 
 
+def write_dropin(dropin_dir, name, body):
+    """Drop a systemd --user override file on the board (base64'd past the adb shell)."""
+    b64 = base64.b64encode(body.encode()).decode()
+    sh(f"mkdir -p {dropin_dir}")
+    sh(f"sh -c 'echo {b64} | base64 -d > {dropin_dir}/{name}'")
+    sc("daemon-reload")
+
+
 def daemon_set_voice(name):
     voices = "en_US-amy-medium,en_US-amy-low" if name == "both" else name
-    body = f"[Service]\nEnvironment=TTS_VOICES={voices}\n"
-    b64 = base64.b64encode(body.encode()).decode()
-    sh(f"mkdir -p {DROPIN_DIR}")
-    sh(f"sh -c 'echo {b64} | base64 -d > {DROPIN_DIR}/voice.conf'")
-    sc("daemon-reload")
+    write_dropin(DROPIN_DIR, "voice.conf", f"[Service]\nEnvironment=TTS_VOICES={voices}\n")
     print(f"voice → {voices}, reloading (~10 s)...")
     print("ready ✓" if restart_and_wait() else "didn't come ready (tts.py daemon logs)")
 
@@ -189,11 +208,72 @@ def daemon_status():
     sink = usr("pactl get-default-sink")[1]
     bt = "bluez" in sink
     print(f"sink   : {sink} {'(BT speaker ✓)' if bt else '(not the BT speaker — bt.py connect)'}")
+    keepalive_status()
 
 
 def daemon_logs():
     rc, out = usr("journalctl --user -u tts-daemon -n 20 --no-pager")
     print(out or "(no logs)")
+
+
+# ── keep-alive ───────────────────────────────────────────────────────────────
+# A Bluetooth speaker mutes its amp after a few seconds of silence and takes ~1 s to wake, which
+# eats the start of a short utterance. Its own service, not part of the TTS daemon, for two
+# reasons: toggling it is then instant (restarting the daemon costs a ~10 s voice reload), and it
+# helps anything that plays audio — espeak.py, paplay, a WAV — not just piper.
+def keepalive_install():
+    sh("mkdir -p ~/.local/bin ~/.config/systemd/user")
+    adb_push(os.path.join(HERE, "tts_keepalive.py"), "/home/arduino/.local/bin/tts_keepalive.py")
+    adb_push(os.path.join(HERE, "tts-keepalive.service"),
+             "/home/arduino/.config/systemd/user/tts-keepalive.service")
+    sh("chmod +x ~/.local/bin/tts_keepalive.py")
+    sc("daemon-reload")
+
+
+def keepalive_level():
+    """The configured floor — a drop-in override if set, else the script's own default."""
+    for tok in sc("show -p Environment --value tts-keepalive")[1].split():
+        if tok.startswith("TTS_KEEPALIVE_LEVEL="):
+            return tok.split("=", 1)[1]
+    return str(DEFAULT_KA_LEVEL)
+
+
+def keepalive_status():
+    active = sc("is-active tts-keepalive")[1]
+    print(f"keepalive : {active} / {sc('is-enabled tts-keepalive')[1]}   "
+          f"level {keepalive_level()} of 32767")
+
+
+_KEEPALIVE_USAGE = "usage: tts.py keepalive [status|on|off|level <n>]"
+
+
+def do_keepalive(args):
+    verb = args[0] if args else "status"
+    if verb == "status":
+        keepalive_status()
+    elif verb == "on":
+        keepalive_install()                       # push first — `on` after an edit picks it up
+        rc, out = sc(f"enable --now {KA_UNIT}")
+        print(f"keepalive on ✓ (level {keepalive_level()})" if not rc else f"failed: {out}")
+    elif verb == "off":
+        rc, out = sc(f"disable --now {KA_UNIT}")
+        print("keepalive off ✓ (expect the first word to clip again)" if not rc
+              else f"failed: {out}")
+    elif verb == "level" and len(args) >= 2:
+        try:
+            level = int(args[1])
+        except ValueError:
+            sys.exit(f"level must be a number out of 32767 — {_KEEPALIVE_USAGE}")
+        if not 0 < level < 32768:
+            sys.exit("level must be 1..32767 (to turn it off: tts.py keepalive off)")
+        write_dropin(KA_DROPIN_DIR, "level.conf",
+                     f"[Service]\nEnvironment=TTS_KEEPALIVE_LEVEL={level}\n")
+        if sc("is-active tts-keepalive")[1] == "active":
+            sc(f"restart {KA_UNIT}")
+        print(f"keepalive level → {level}"
+              f"{'' if level <= 60 else '  (may be audible as hiss)'}")
+    else:
+        sys.exit(_KEEPALIVE_USAGE)
 
 
 _DAEMON_USAGE = ("usage: tts.py daemon "
@@ -255,6 +335,10 @@ def doctor():
     row("bluez" in sink, "default sink", sink or "?",
         "pactl set-default-sink bluez_output.<MAC>.1   (or reconnect: bt.py connect)")
 
+    ka = sc("is-active tts-keepalive")[1] == "active"
+    row(ka, "keep-alive", f"level {keepalive_level()}" if ka else "off — first word will clip",
+        "tts.py keepalive on")
+
 
 def main():
     args = sys.argv[1:]
@@ -263,6 +347,10 @@ def main():
         return
     if args[0] == "daemon":
         do_daemon(args[1:])
+    elif args[0] == "keepalive":
+        if not have_board():
+            sys.exit("no adb device — plug the Uno Q in over USB")
+        do_keepalive(args[1:])
     elif args[0] == "doctor":
         doctor()
     else:

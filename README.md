@@ -32,8 +32,9 @@ FIFO at `/run/user/<uid>/tts.fifo` — fire-and-forget, faster than realtime
 | Tool | What it does |
 |------|--------------|
 | `setup-tts.py` | installs Piper (pipx) + voices on the board |
-| `tts.py` | speak text from the host; `tts.py daemon status\|start\|stop\|restart\|install\|uninstall\|voice\|logs`; `tts.py doctor` |
+| `tts.py` | speak text from the host; `tts.py daemon status\|start\|stop\|restart\|install\|uninstall\|voice\|logs`; `tts.py keepalive on\|off\|level <n>`; `tts.py doctor` |
 | `tts_daemon.py` | the daemon itself (runs on the board; `tts-daemon.service` systemd --user unit) |
+| `tts_keepalive.py` | sub-audible floor that stops the speaker's amp sleeping (`tts-keepalive.service`) |
 | `tts-bench.py` | measure voice speed (real-time factor) per voice |
 | `espeak.py` | zero-setup fallback: speak via espeak-ng |
 
@@ -41,35 +42,51 @@ Any on-board program can speak by writing a line to the FIFO (`"text"` or
 `"voice-name:text"`) — that's the whole client contract, and the FIFO's
 existence signals a warm daemon.
 
-**Clipped first word?** Each utterance gets a fresh `paplay`, so the sink resumes
-from idle and a Bluetooth speaker unmutes its amp — anything played during that
-ramp is lost. The daemon plays a **400 ms quiet tone** ahead of every line to
-absorb it, and prefetches Piper's first chunk so there's no silent gap between
-the tone and the speech.
-
-Both details matter, and both were found by capturing the sink monitor
-(`parecord --device=bluez_output.<MAC>.1.monitor`) rather than by ear:
-
-- **A tone, not silence.** The board was emitting the complete phrase while the
-  speaker reproduced only the tail — so the loss is downstream, and digital
-  silence carries no energy for an amp to wake on.
-- **No gap.** Streaming Piper's output directly left a 240 ms hole between tone
-  and speech while synthesis caught up — long enough for the amp to fall back
-  asleep, undoing the lead-in.
-
-If your speaker still clips, give it a longer runway:
+**Clipped first word?** A Bluetooth speaker mutes its amp after a few seconds of
+silence and takes about a second to come back, so the start of a short
+announcement is simply gone. `tts-keepalive.service` fixes it by never letting the
+stream go silent: it plays a continuous **sub-audible noise floor** to the default
+sink, the amp stays on, and speech starts instantly. It's installed and enabled by
+`tts.py daemon install`.
 
 ```bash
-systemctl --user edit tts-daemon      # add:  [Service]
-                                      #       Environment=TTS_LEAD_MS=700
-systemctl --user restart tts-daemon
+tts.py keepalive              # status: active / enabled, level
+tts.py keepalive off          # let the speaker idle down again
+tts.py keepalive on
+tts.py keepalive level 40     # floor amplitude out of 32767
 ```
 
-To measure what it needs, speak `"one two three four five six seven eight"` and
-note the first number you hear cleanly — each is roughly 400 ms, so hearing
-"three" first means about 800 ms is being lost. `TTS_LEAD_LEVEL` (default 700 of
-32767) sets the tone's loudness and `TTS_LEAD_HZ` (220) its pitch; `TTS_LEAD_MS=0`
-disables the lead-in entirely.
+It's a separate unit from the TTS daemon on purpose — toggling is instant (a
+daemon restart costs a ~10 s voice reload), and the floor helps anything that
+plays audio, `espeak.py` and bare `paplay` included.
+
+To measure what your speaker loses, speak `"one two three four five six seven
+eight"` with the floor off and note the first number you hear cleanly — each is
+roughly 400 ms, so starting at "three" means about 1.3 s is going missing.
+
+Picking the level is a squeeze between two thresholds, and on the S-SOUND here
+the window is narrow:
+
+- **Silence doesn't work.** The detector is level-based, not digital-zero-based:
+  a floor of amplitude 2 (~-84 dBFS) left the speech still clipped, so the usual
+  "loop a silent WAV" advice fails. 20 holds the amp awake.
+- **Too much is audible.** 150 is plain hiss in a quiet room. 20 is inaudible,
+  60 is borderline.
+
+If your speaker needs more energy than it can hide, switch shape rather than
+level — a 60 Hz sine at level 600 also holds the amp, and a small driver can't
+reproduce it:
+
+```bash
+systemctl --user edit tts-keepalive   # add:  [Service]
+                                      #       Environment=TTS_KEEPALIVE_MODE=tone
+systemctl --user restart tts-keepalive
+```
+
+The daemon also has a **lead-in tone** (`TTS_LEAD_MS`, default 0 — off) that pads
+each utterance instead. It's the older fix and a worse one: to cover a 1.3 s wake
+it has to be 1.3 s of *audible* tone before every phrase, paying that latency
+every time. Use it only for a speaker the keep-alive can't hold.
 
 See also the no-suspend drop-in in
 [docs/unoq-bluetooth-audio.md](docs/unoq-bluetooth-audio.md) §3b — that fixes the

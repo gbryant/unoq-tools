@@ -193,6 +193,38 @@ espeak-ng "test"; sleep 10; pactl list sinks short | grep bluez   # -> IDLE, not
 Cost: the A2DP stream stays open, so the speaker never idles down on its own. That's the
 trade you want for a voice-announcement board, but it will keep a battery speaker awake.
 
+### 3c. Stop the speaker's own amp sleeping (the other half of clipped speech)
+
+§3b fixes the *source* side. There is a second, independent layer in the speaker itself, and
+fixing one does not fix the other: nearly every cheap Bluetooth speaker runs its amp in
+signal-sense standby, muting the output stage after a few seconds of silence to save battery and
+hide idle hiss. Waking it takes ~1 s, and whatever plays during that ramp is lost.
+
+Confirming which layer you're on takes one command each. If the transport stays `active` while
+the clipping continues, the link is fine and the speaker is the culprit:
+
+```bash
+pactl list sinks short | grep bluez     # IDLE at rest = §3b applied (not SUSPENDED)
+
+# Find the transport object first — the path is .../sepN/fdN and the fd index increments with
+# each connection (fd0, then fd1 after a reconnect), so don't hardcode it:
+dbus-send --system --print-reply --dest=org.bluez / \
+  org.freedesktop.DBus.ObjectManager.GetManagedObjects \
+  | grep -o "/org/bluez/hci0/dev_<MAC>/sep[0-9]*/fd[0-9]*" | sort -u
+
+dbus-send --system --print-reply --dest=org.bluez <that path> \
+  org.freedesktop.DBus.Properties.GetAll string:org.bluez.MediaTransport1 | grep -A1 State
+```
+
+No protocol message means "wake up", so the only fix is to never go silent: stream a
+sub-audible floor continuously. That's `tts-keepalive.service` — `tts.py keepalive on|off` (see
+the README), and it covers everything that plays audio, not just Piper.
+
+Measured on an S-SOUND here: speech reliably started at "three" of "one two three four…",
+so ~1.3 s was being lost. The detector is **level**-based, not digital-zero-based — a floor of
+amplitude 2 (~-84 dBFS) did *not* hold the amp awake, which is why looping a silent WAV, the
+advice you'll usually find, doesn't work. 20 does, and is inaudible; 150 is audible hiss.
+
 ---
 
 ## 4. Pairing (one-time per speaker)
@@ -265,8 +297,8 @@ The sink flips to `RUNNING` during playback. At rest you want **`IDLE`** — if 
    ```bash
    paplay /usr/share/sounds/alsa/Front_Center.wav 2>/dev/null; sleep 0.5; espeak-ng "the real message"
    ```
-   Note a *battery* speaker may still sleep its own amp on idle regardless — that's the
-   speaker's own timer, not PipeWire's, and only it can be told not to.
+   **Still clipped with the sink sitting at `IDLE`?** Then it's the speaker's own amp standby,
+   not PipeWire — a separate layer with a separate fix: **§3c**, `tts.py keepalive on`.
 4. **Audio goes to onboard `Headphones` instead of the speaker** → make the bluez sink default:
    `pactl set-default-sink bluez_output.<MAC>.1` (or `wpctl set-default <id>`).
 5. **Erratic audio, server identity flip-flops** → both PulseAudio *and* PipeWire installed and

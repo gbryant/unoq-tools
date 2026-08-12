@@ -9,9 +9,12 @@ Speaks via the board's espeak-ng on the default sink (your BT speaker — see bt
 Handles the env gotcha for you: a one-shot `adb shell espeak-ng …` is non-interactive so it never
 sources ~/.bashrc and lands with no PipeWire socket → silence; this always prefixes the env.
 
---wake: a BT speaker amp sleeps when idle and swallows the first ~½ s of audio, so a cold call
-can lose the opening word. --wake plays a short throwaway sound first to wake the amp. Not needed
-once warm (rapid repeated calls), so it's off by default for speed.
+--wake: a BT speaker amp sleeps when idle and swallows the first second or so of audio, so a cold
+call can lose the opening word. --wake plays a short throwaway sound first to wake the amp. Not
+needed once warm (rapid repeated calls), so it's off by default for speed.
+
+Better than --wake, and it covers espeak too: `tts.py keepalive on` streams a sub-audible floor so
+the amp never sleeps in the first place — no throwaway burst, no lost word, nothing to remember.
 """
 import shlex
 import subprocess

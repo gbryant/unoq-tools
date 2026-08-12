@@ -1,0 +1,14 @@
+[Unit]
+Description=TTS keep-alive floor (stops a Bluetooth speaker's amp sleeping between utterances)
+After=pipewire.service wireplumber.service
+
+[Service]
+# System python — this one has no piper dependency, it just writes a noise floor to paplay. The
+# user manager provides XDG_RUNTIME_DIR + the dbus session so paplay reaches the default sink.
+# Set TTS_KEEPALIVE_LEVEL / _MODE / _HZ to retune (or: tts.py keepalive level <n>).
+ExecStart=/usr/bin/python3 %h/.local/bin/tts_keepalive.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
