@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tts.py — speak text + manage the Piper TTS daemon on the Arduino Uno Q, over adb.
+"""tts.py — speak text + manage the Piper TTS daemon on the Arduino Uno Q.
 
 Speak (the frequent action):
   tts.py "the robot is ready"          # quotes optional — args are joined
@@ -28,10 +28,10 @@ load). espeak.py is the instant low-quality alternative.
 import base64
 import os
 import shlex
-import subprocess
 import sys
 
-UENV = 'XDG_RUNTIME_DIR=/run/user/$(id -u) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus'
+import board
+
 VOICE_DIR = "$HOME/.local/share/piper"
 FIFO = "/run/user/$(id -u)/tts.fifo"
 WAKE_WAV = "/usr/share/sounds/alsa/Front_Center.wav"
@@ -44,23 +44,14 @@ KA_DROPIN_DIR = "$HOME/.config/systemd/user/tts-keepalive.service.d"
 DEFAULT_KA_LEVEL = 20
 
 
-# ── board I/O ────────────────────────────────────────────────────────────────
-def _run(args, inp=None, timeout=60):
-    try:
-        return subprocess.run(args, text=True, capture_output=True, input=inp, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        return None
-
-
+# ── board I/O (adb over USB, or ssh when $UNOQ_HOST is set — see board.py) ───
 def usr(cmd, timeout=60):
     """User-session command (env-prefixed for PipeWire/systemd --user); (rc, output)."""
-    p = _run(["adb", "shell", f"{UENV} {cmd}"], timeout=timeout)
-    return (124, "(timed out)") if p is None else (p.returncode, (p.stdout + p.stderr).strip())
+    return board.usr(cmd, timeout=timeout)
 
 
 def sh(cmd, timeout=60):
-    p = _run(["adb", "shell", cmd], timeout=timeout)
-    return (124, "") if p is None else (p.returncode, p.stdout.strip())
+    return board.sh(cmd, timeout=timeout)
 
 
 def sc(args, timeout=60):
@@ -68,12 +59,11 @@ def sc(args, timeout=60):
 
 
 def have_board():
-    d = _run(["adb", "devices"], timeout=10)
-    return bool(d) and any(l.strip().endswith("device") for l in d.stdout.splitlines()[1:])
+    return board.available()
 
 
-def adb_push(local, remote):
-    return _run(["adb", "push", local, remote], timeout=60)
+def push(local, remote):
+    return board.push(local, remote)
 
 
 def ask(prompt, default=False):
@@ -119,8 +109,7 @@ def do_speak(args):
     text = " ".join(args).strip()
     if not text:
         sys.exit("nothing to say — usage: tts.py \"some text\"")
-    if not have_board():
-        sys.exit("no adb device — plug the Uno Q in over USB")
+    board.require()
     if not oneshot and not wake and daemon_running():
         rc, out = speak_daemon(text, voice)
     else:
@@ -146,9 +135,9 @@ def restart_and_wait():
 def daemon_install():
     """Push the daemon + unit and enable the systemd --user service. Reusable from setup-tts.py."""
     sh("mkdir -p ~/.local/bin ~/.config/systemd/user")
-    adb_push(os.path.join(HERE, "tts_daemon.py"), "/home/arduino/.local/bin/tts_daemon.py")
-    adb_push(os.path.join(HERE, "tts-daemon.service"),
-             "/home/arduino/.config/systemd/user/tts-daemon.service")
+    push(os.path.join(HERE, "tts_daemon.py"), "/home/arduino/.local/bin/tts_daemon.py")
+    push(os.path.join(HERE, "tts-daemon.service"),
+         "/home/arduino/.config/systemd/user/tts-daemon.service")
     sh("chmod +x ~/.local/bin/tts_daemon.py")
     sc("daemon-reload")
     sc(f"enable {UNIT} >/dev/null 2>&1")
@@ -180,7 +169,7 @@ def daemon_uninstall():
 
 
 def write_dropin(dropin_dir, name, body):
-    """Drop a systemd --user override file on the board (base64'd past the adb shell)."""
+    """Drop a systemd --user override file on the board (base64'd past the shell)."""
     b64 = base64.b64encode(body.encode()).decode()
     sh(f"mkdir -p {dropin_dir}")
     sh(f"sh -c 'echo {b64} | base64 -d > {dropin_dir}/{name}'")
@@ -223,9 +212,9 @@ def daemon_logs():
 # helps anything that plays audio — espeak.py, paplay, a WAV — not just piper.
 def keepalive_install():
     sh("mkdir -p ~/.local/bin ~/.config/systemd/user")
-    adb_push(os.path.join(HERE, "tts_keepalive.py"), "/home/arduino/.local/bin/tts_keepalive.py")
-    adb_push(os.path.join(HERE, "tts-keepalive.service"),
-             "/home/arduino/.config/systemd/user/tts-keepalive.service")
+    push(os.path.join(HERE, "tts_keepalive.py"), "/home/arduino/.local/bin/tts_keepalive.py")
+    push(os.path.join(HERE, "tts-keepalive.service"),
+         "/home/arduino/.config/systemd/user/tts-keepalive.service")
     sh("chmod +x ~/.local/bin/tts_keepalive.py")
     sc("daemon-reload")
 
@@ -283,8 +272,7 @@ _DAEMON_USAGE = ("usage: tts.py daemon "
 def do_daemon(args):
     if not args:
         sys.exit(_DAEMON_USAGE)
-    if not have_board():
-        sys.exit("no adb device — plug the Uno Q in over USB")
+    board.require()
     verb = args[0]
     if verb == "status":
         daemon_status()
@@ -305,8 +293,7 @@ def do_daemon(args):
 
 # ── doctor ───────────────────────────────────────────────────────────────────
 def doctor():
-    if not have_board():
-        sys.exit("no adb device — plug the Uno Q in over USB")
+    board.require()
 
     def row(ok, label, detail, fix):
         print(f"  {'✓' if ok else '✗'} {label:<14} {detail}")
@@ -348,8 +335,7 @@ def main():
     if args[0] == "daemon":
         do_daemon(args[1:])
     elif args[0] == "keepalive":
-        if not have_board():
-            sys.exit("no adb device — plug the Uno Q in over USB")
+        board.require()
         do_keepalive(args[1:])
     elif args[0] == "doctor":
         doctor()

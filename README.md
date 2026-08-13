@@ -148,8 +148,39 @@ adb shell 'journalctl --user -u bt-autoconnect -f'
 
 It logs only transitions, so the journal stays readable across days of uptime.
 
+## Reaching the board — USB or network
+
+The tools speak to the board two ways, chosen by **`UNOQ_HOST`**:
+
+```bash
+volume.py 60                                  # adb over USB (the default)
+UNOQ_HOST=gandalf.local volume.py 60          # ssh (user defaults to `arduino`)
+UNOQ_HOST=arduino@192.168.1.54 volume.py 60   # or spell the user out
+export UNOQ_HOST=gandalf.local                # once the board lives somewhere permanent
+```
+
+adb is right on the bench: USB, no network, no credentials. It's useless the moment the
+board is *deployed* — running as an appliance across the room with nothing plugged into
+it — and that's exactly when you want to change the volume or reconnect a speaker. Same
+commands, same output, either way.
+
+ssh needs a key, or every call prompts for a password:
+
+```bash
+ssh-copy-id arduino@gandalf.local     # once
+```
+
+Connections are multiplexed (ControlMaster), so a tool making several calls pays the
+handshake once, and everything is timeout-bounded so an unreachable board fails instead
+of hanging.
+
+`volume.py`, `bt.py`, `tts.py` and `espeak.py` work over either transport. The one-time
+**setup wizards** (`setup-board.py`, `setup-bt-audio.py`, `setup-tts.py`) are still
+adb-only — they're bench jobs you run with the board in front of you, before it has a
+network to be reached over.
+
 ## Prerequisites
 
 `adb` on the host (`brew install --cask android-platform-tools` /
-`apt install adb`) and the Uno Q on USB. Each tool prints what it needs beyond
-that when first run.
+`apt install adb`) and the Uno Q on USB — or `UNOQ_HOST` set and an ssh key installed,
+per above. Each tool prints what it needs beyond that when first run.

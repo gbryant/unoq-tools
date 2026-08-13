@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""volume.py — report or adjust the Arduino Uno Q's audio volume from your host, over adb.
+"""volume.py — report or adjust the Arduino Uno Q's audio volume from your host.
 
 Targets the DEFAULT sink (your BT speaker once it's the default — see setup-bt-audio.py), via
 PipeWire's `wpctl`. No sudo (volume is user-session). Caps at 100% so you can't over-amplify
@@ -10,26 +10,20 @@ into distortion.
   volume.py +10        raise 10%
   volume.py -10        lower 10%
   volume.py mute | unmute | toggle
+
+Works over USB or over the network: set `UNOQ_HOST=gandalf.local` to reach a deployed board by
+ssh instead of adb — which is the usual case for this tool, since a board running as an
+appliance is exactly the one you can't reach over USB. See board.py.
 """
-import subprocess
 import sys
 
-UENV = 'XDG_RUNTIME_DIR=/run/user/$(id -u) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus'
+import board
+
 SINK = "@DEFAULT_AUDIO_SINK@"
 
 
 def usr(cmd, timeout=15):
-    try:
-        p = subprocess.run(["adb", "shell", f"{UENV} {cmd}"],
-                          capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        return "(timed out)"
-    return (p.stdout + p.stderr).strip()
-
-
-def have_board():
-    devs = subprocess.run(["adb", "devices"], capture_output=True, text=True)
-    return any(l.strip().endswith("device") for l in devs.stdout.splitlines()[1:])
+    return board.usr(cmd, timeout=timeout)[1]
 
 
 def report():
@@ -51,8 +45,7 @@ def main():
         print(__doc__.strip())
         return
 
-    if not have_board():
-        sys.exit("no adb device — plug the Uno Q in over USB")
+    board.require()
 
     if len(sys.argv) < 2:
         report()

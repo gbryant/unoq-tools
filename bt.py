@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""bt.py — connect / pair / report Bluetooth audio on the Arduino Uno Q, from your host over adb.
+"""bt.py — connect / pair / report Bluetooth audio on the Arduino Uno Q, from your host.
 
 Targets the board's BlueZ over `bluetoothctl` (no sudo — BT ops are user-session). Most useful
 daily: reconnect a speaker that idle-disconnected. Also drives the one-time pairing flow that
@@ -26,16 +26,17 @@ after a power cycle a paired speaker sits idle and the board is mute until someo
 out until the speaker answers, so power alone is enough. It also handles switching the speaker
 on after the board, and re-links one that idle-drops.
 
-Needs the board reachable over adb and `bluetooth.service` running (setup-bt-audio.py enables it).
+Needs the board reachable (adb over USB, or ssh with $UNOQ_HOST set — see board.py) and
+`bluetooth.service` running (setup-bt-audio.py enables it).
 """
 import base64
 import os
 import shlex
-import subprocess
 import sys
 import time
 
-UENV = 'XDG_RUNTIME_DIR=/run/user/$(id -u) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus'
+import board
+
 HERE = os.path.dirname(os.path.abspath(__file__))     # repo root — the loop + unit live here
 AC_UNIT = "bt-autoconnect.service"
 AC_DROPIN_DIR = "$HOME/.config/systemd/user/bt-autoconnect.service.d"
@@ -43,17 +44,11 @@ AC_DROPIN_DIR = "$HOME/.config/systemd/user/bt-autoconnect.service.d"
 
 # ── board I/O (timeout-bounded — bluetoothctl hangs if the daemon is down) ───
 def usr(cmd, timeout=20):
-    try:
-        p = subprocess.run(["adb", "shell", f"{UENV} {cmd}"],
-                          capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        return "(timed out)"
-    return (p.stdout + p.stderr).strip()
+    return board.usr(cmd, timeout=timeout)[1]
 
 
 def have_board():
-    d = subprocess.run(["adb", "devices"], capture_output=True, text=True)
-    return any(l.strip().endswith("device") for l in d.stdout.splitlines()[1:])
+    return board.available()
 
 
 def ask(prompt, default=True):
@@ -158,8 +153,7 @@ def cmd_connect(mac=None):
 # speaker to dial IN — so a board that boots with nobody at a keyboard stays mute. This runs a
 # board-side loop that dials OUT until the speaker answers.
 def _sh(cmd, timeout=20):
-    p = subprocess.run(["adb", "shell", cmd], capture_output=True, text=True, timeout=timeout)
-    return p.stdout.strip()
+    return board.sh(cmd, timeout=timeout)[1]
 
 
 def _sc(args, timeout=20):
@@ -193,10 +187,10 @@ def cmd_autoconnect(action=None, mac=None):
         if not mac:
             sys.exit("no paired device to auto-connect — run `bt.py pair` first")
     _sh("mkdir -p ~/.local/bin ~/.config/systemd/user")
-    subprocess.run(["adb", "push", os.path.join(HERE, "bt_autoconnect.py"),
-                    "/home/arduino/.local/bin/bt_autoconnect.py"], capture_output=True)
-    subprocess.run(["adb", "push", os.path.join(HERE, AC_UNIT),
-                    f"/home/arduino/.config/systemd/user/{AC_UNIT}"], capture_output=True)
+    board.push(os.path.join(HERE, "bt_autoconnect.py"),
+               "/home/arduino/.local/bin/bt_autoconnect.py")
+    board.push(os.path.join(HERE, AC_UNIT),
+               f"/home/arduino/.config/systemd/user/{AC_UNIT}")
     _sh("chmod +x ~/.local/bin/bt_autoconnect.py")
     body = f"[Service]\nEnvironment=BT_AUTOCONNECT_MAC={mac}\n"
     b64 = base64.b64encode(body.encode()).decode()
@@ -237,7 +231,7 @@ def bt_ready():
     if usr("systemctl is-active bluetooth", timeout=10) != "active":
         print("  bluetooth.service isn't active — BT commands would just time out.\n"
               "  Fix: run setup-bt-audio.py (it enables the service), or\n"
-              "       adb shell sudo systemctl enable --now bluetooth")
+              f"       {board.shell_prefix()} 'sudo systemctl enable --now bluetooth'")
         return False
 
     present, powered = adapter_state()
@@ -251,10 +245,11 @@ def bt_ready():
         print("  the Bluetooth controller is DOWN and refuses to power on.\n"
               "  Most likely the QCA SoC crashed — a stalled speaker link can take it out,\n"
               "  and its firmware-reload recovery sometimes times out too. Confirm with:\n"
-              '    adb shell "dmesg | grep -i hci | tail"\n'
+              f"    {board.shell_prefix()} 'dmesg | grep -i hci | tail'\n"
               "  ('crash the soc' / 'Change address cmd failed' / bluetoothd 'Invalid Index').\n"
               "  Recovery is a board reboot — power-cycling the UART-attached chip:\n"
-              "    adb reboot\n"
+              f"    {board.shell_prefix()} 'sudo reboot'   (adb reboot silently does nothing:\n"
+              "                                        adbd runs as `arduino`, not root)\n"
               "  NOTE: while it's down BlueZ reports NO paired devices, so anything you had\n"
               "  paired will look unpaired. Don't re-pair; reboot first.")
         return False
@@ -331,8 +326,7 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
         print(__doc__.strip())
         return
-    if not have_board():
-        sys.exit("no adb device — plug the Uno Q in over USB")
+    board.require()
 
     args = sys.argv[1:]
     diff = bool({"--diff", "-d"} & set(args))
