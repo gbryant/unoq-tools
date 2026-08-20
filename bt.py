@@ -10,14 +10,20 @@ setup-bt-audio.py calls for its last step.
   bt.py disconnect [MAC]
   bt.py pair            scan, pick a new speaker, pair+trust+connect, set default + test
   bt.py pair --diff     two scans (speaker off, then on) — pick from ONLY what appeared
+  bt.py pair --all      include non-audio devices in the pick list
   bt.py forget [MAC]    disconnect + remove a pairing, so it can't auto-reconnect
   bt.py autoconnect on <MAC> | off | status
                         keep a speaker connected from the board itself — for a headless
                         board that boots with no computer attached (see below)
 
+`pair` lists only what BlueZ classes as an audio device, which is what makes it usable in a
+crowded RF neighbourhood — a scan here turns up ~25 devices, all but three of them LE beacons
+advertising no name. `--all` lifts the filter for a speaker that reports no class.
+
 `pair --diff` is for the speaker whose name you can't recognise — a brandless one advertising
-a bare MAC, or a crowded RF neighbourhood. It scans once with the speaker off to take a
-baseline, once with it on, and offers the difference. Nothing to identify by eye.
+a bare MAC. It scans once with the speaker off to take a baseline, once with it on, and offers
+the difference. Usually unnecessary now the list is filtered, and note that LE devices rotate
+their addresses between scans, so `--diff` on its own sees them all as new.
 
 `autoconnect` is what makes a board standalone. Pairing survives a reboot but a *connection*
 doesn't, and `Trusted: yes` only lets the speaker dial IN — nothing on the board dials OUT, so
@@ -61,15 +67,86 @@ def ask(prompt, default=True):
 
 
 # ── device queries ───────────────────────────────────────────────────────────
-def _devices(which):
-    """which in {'Paired','Connected',''}; returns [(mac, name), ...]."""
-    out = usr(f"bluetoothctl devices {which}".strip())
-    devs = []
-    for line in out.splitlines():
-        parts = line.split(maxsplit=2)
-        if len(parts) >= 2 and parts[0] == "Device":
-            devs.append((parts[1], parts[2] if len(parts) > 2 else parts[1]))
+# Deliberately NOT `bluetoothctl devices Paired` — that filter argument arrives in BlueZ 5.65,
+# and 5.64 (JetPack 6.2.3) takes no argument at all: the extra word is a hard error, "Too many
+# arguments". A parser looking for "Device ..." lines skips that quietly and returns an EMPTY
+# list, so every paired speaker looks unpaired — status reports nothing paired, and `pair`
+# offers speakers you already own as fresh candidates. `info` has been there since forever and
+# carries the same state, so we ask per device instead.
+class Dev:
+    """One device BlueZ knows about, with the state `devices <filter>` would have given."""
+
+    def __init__(self, mac, name):
+        self.mac, self.name = mac, name
+        self.paired = self.trusted = self.connected = False
+        self.icon = self.cls = ""
+
+    @property
+    def audio(self):
+        """A speaker/headset rather than an LE beacon. Two signals, because either can be
+        absent: BlueZ's own Icon, and the Class of Device major class (0x04 = Audio/Video),
+        which only classic BR/EDR devices report at all."""
+        if self.icon.startswith("audio-"):
+            return True
+        try:
+            return (int(self.cls, 16) >> 8) & 0x1f == 0x04
+        except ValueError:
+            return False
+
+    # BlueZ's icon names are freedesktop icon names, not English — "audio-card" is what it
+    # calls a plain speaker, which reads as nonsense in a pick list.
+    KINDS = {"audio-card": "speaker", "audio-headset": "headset",
+             "audio-headphones": "headphones", "audio-input-microphone": "microphone"}
+
+    @property
+    def kind(self):
+        """speaker / headset / headphones — for labelling a pick list."""
+        return self.KINDS.get(self.icon, self.icon.split("audio-", 1)[-1] or "audio")
+
+
+def devices(scan_secs=0):
+    """Every device BlueZ knows, as [Dev]. scan_secs > 0 discovers first, in the same shell.
+
+    One board command, never two: devices a scan turns up are TEMPORARY. BlueZ drops an
+    unpaired one ~30 s after discovery stops, and `info` on a dropped MAC prints nothing at
+    all — so the scan and the interrogation have to share a shell, or the candidates
+    evaporate in the gap between two calls.
+
+    Wrapped in `sh -c` because usr() prefixes `VAR=... VAR=... <cmd>`, and that form exports
+    to the FIRST command only — the `info` calls inside the loop would run bare. Handing the
+    prefix to a shell puts the vars in its environment, where the whole script inherits them.
+    """
+    scan = f"bluetoothctl --timeout {scan_secs} scan on >/dev/null 2>&1; " if scan_secs else ""
+    script = (f'{scan}bluetoothctl devices | while read -r _ mac rest; do '
+              'printf "@@%s\\t%s\\n" "$mac" "$rest"; bluetoothctl info "$mac"; done')
+    devs, cur = [], None
+    for line in usr(f"sh -c '{script}'", timeout=90 + scan_secs).splitlines():
+        if line.startswith("@@"):
+            mac, _, name = line[2:].partition("\t")
+            mac = mac.strip()
+            cur = Dev(mac, name.strip() or mac)
+            devs.append(cur)
+            continue
+        if cur is None:
+            continue
+        key, _, val = line.strip().partition(": ")
+        val = val.strip()
+        if key == "Paired":
+            cur.paired = val == "yes"
+        elif key == "Trusted":
+            cur.trusted = val == "yes"
+        elif key == "Connected":
+            cur.connected = val == "yes"
+        elif key == "Icon":
+            cur.icon = val
+        elif key == "Class":
+            cur.cls = val
     return devs
+
+
+def _pairs(devs, attr):
+    """[(mac, name), ...] for the devices where `attr` is true — what _pick() wants."""
+    return [(d.mac, d.name) for d in devs if getattr(d, attr)]
 
 
 def sink_for(mac):
@@ -121,14 +198,14 @@ def make_default(mac, announce=False):
 def cmd_status():
     if not bt_ready():
         return
-    conn = {m for m, _ in _devices("Connected")}
-    paired = _devices("Paired")
+    paired = [d for d in devices() if d.paired]
     if not paired:
         print("no paired devices — run `bt.py pair`")
     else:
         print("paired:")
-        for m, n in paired:
-            print(f"  {'● connected' if m in conn else '○ disconnected'}  {n} [{m}]")
+        for d in paired:
+            state = "● connected" if d.connected else "○ disconnected"
+            print(f"  {state}  {d.name} [{d.mac}]")
     print(f"default sink: {default_sink()}")
 
 
@@ -136,7 +213,7 @@ def cmd_connect(mac=None):
     if not bt_ready():
         return
     if not mac:
-        mac = _pick(_devices("Paired"), "paired device")
+        mac = _pick(_pairs(devices(), "paired"), "paired device")
         if not mac:
             print("nothing to connect (no paired device / no pick) — try `bt.py pair`")
             return
@@ -183,7 +260,7 @@ def cmd_autoconnect(action=None, mac=None):
         sys.exit("usage: bt.py autoconnect [status|on <MAC>|off]")
 
     if not mac:
-        mac = _pick(_devices("Paired"), "paired device")
+        mac = _pick(_pairs(devices(), "paired"), "paired device")
         if not mac:
             sys.exit("no paired device to auto-connect — run `bt.py pair` first")
     _sh("mkdir -p ~/.local/bin ~/.config/systemd/user")
@@ -204,7 +281,7 @@ def cmd_autoconnect(action=None, mac=None):
 
 def cmd_disconnect(mac=None):
     if not mac:
-        mac = _pick(_devices("Connected"), "connected device")
+        mac = _pick(_pairs(devices(), "connected"), "connected device")
         if not mac:
             print("nothing connected")
             return
@@ -257,47 +334,62 @@ def bt_ready():
 
 
 def _scan(secs=SCAN_SECS):
-    """Discovery pass; returns [(mac, name), ...] known to BlueZ afterwards."""
+    """Discovery pass; returns the [Dev] BlueZ knows immediately afterwards."""
     usr("bluetoothctl power on")
-    usr(f"bluetoothctl --timeout {secs} scan on", timeout=secs + 15)
-    return _devices("")
+    return devices(scan_secs=secs)
 
 
 def _candidates_plain(paired):
     print(f"  put the speaker in pairing mode, then scanning {SCAN_SECS} s...")
-    return [(m, n) for m, n in _scan() if m not in paired]
+    return [d for d in _scan() if d.mac not in paired]
 
 
 def _candidates_diff(paired):
     """Two scans bracketing the speaker being switched on; the new speaker is the set
     difference. Identifies a device you can't recognise by name."""
     input(f"  1/2 — make sure the speaker is OFF, then press Enter (scans {SCAN_SECS} s)...")
-    before = {m for m, _ in _scan()}
+    before = {d.mac for d in _scan()}
     print(f"       baseline: {len(before)} device(s) in range")
     input("  2/2 — now switch the speaker ON / into pairing mode, then press Enter...")
     after = _scan()
-    new = [(m, n) for m, n in after if m not in before and m not in paired]
+    new = [d for d in after if d.mac not in before and d.mac not in paired]
     if new:
         return new
     print("  nothing new appeared. Either the speaker isn't in pairing mode or is out of\n"
           "  range, or BlueZ already had it cached from an earlier scan — a cached device\n"
           "  is in the baseline too, so the difference can't reveal it. Showing everything\n"
           "  unpaired instead; `bt.py forget` clears a stale entry if you spot one.")
-    return [(m, n) for m, n in after if m not in paired]
+    return [d for d in after if d.mac not in paired]
 
 
-def cmd_pair(diff=False):
+def _offer(cands, show_all):
+    """(what to show, how many were hidden). Everything but the audio devices is noise: a scan
+    here turns up ~20 LE beacons that advertise no name — so they print as their own MAC — at
+    private addresses that ROTATE between scans, which is also what defeats `--diff` without
+    this filter. Fall back to the whole list if nothing claims to be audio, so a speaker that
+    reports no class can still be paired without reaching for --all."""
+    if show_all:
+        return cands, 0
+    audio = [d for d in cands if d.audio]
+    return (audio, len(cands) - len(audio)) if audio else (cands, 0)
+
+
+def cmd_pair(diff=False, show_all=False):
     if not bt_ready():
         return
-    paired = {m for m, _ in _devices("Paired")}
+    paired = {d.mac for d in devices() if d.paired}
     cands = _candidates_diff(paired) if diff else _candidates_plain(paired)
     if not cands:
         print("  no unpaired devices found — is the speaker in pairing mode?")
         return
-    if not diff and len(cands) > 4:
-        print(f"  ({len(cands)} candidates — `bt.py pair --diff` narrows this to the one you"
-              " just switched on)")
-    mac = _pick(cands, "candidate", confirm=True)
+    shown, hidden = _offer(cands, show_all)
+    if hidden:
+        print(f"  ({hidden} non-audio device(s) hidden — `bt.py pair --all` shows them)")
+    elif not show_all and len(shown) > 4:
+        print("  (nothing here reports itself as audio, so all of it is listed — if the\n"
+              "   speaker isn't among these it may not be in pairing mode)")
+    entries = [(d.mac, f"{d.name}  ({d.kind})" if d.audio else d.name) for d in shown]
+    mac = _pick(entries, "candidate", confirm=True)
     if not mac:
         print("  nothing selected.")
         return
@@ -312,7 +404,7 @@ def cmd_forget(mac=None):
     """Remove a pairing. A paired device stays *trusted*, so it can auto-reconnect and take
     the default sink back — forget the old speaker when you swap."""
     if not mac:
-        mac = _pick(_devices("Paired"), "paired device")
+        mac = _pick(_pairs(devices(), "paired"), "paired device")
         if not mac:
             print("nothing paired to forget")
             return
@@ -330,7 +422,8 @@ def main():
 
     args = sys.argv[1:]
     diff = bool({"--diff", "-d"} & set(args))
-    args = [a for a in args if a not in ("--diff", "-d")]
+    show_all = "--all" in args
+    args = [a for a in args if a not in ("--diff", "-d", "--all")]
 
     cmd = args[0] if args else "status"
     arg = args[1] if len(args) > 1 else None
@@ -341,7 +434,7 @@ def main():
     elif cmd == "disconnect":
         cmd_disconnect(arg)
     elif cmd == "pair":
-        cmd_pair(diff)
+        cmd_pair(diff, show_all)
     elif cmd == "autoconnect":
         cmd_autoconnect(arg, args[2] if len(args) > 2 else None)
     elif cmd == "forget":

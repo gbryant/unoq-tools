@@ -112,16 +112,26 @@ After that `bt.py` is the daily tool:
 ./bt.py connect         # reconnect a speaker that idle-disconnected
 ./bt.py pair            # scan, pick, pair+trust+connect, set default, speak a test word
 ./bt.py pair --diff     # can't tell which entry is yours? see below
+./bt.py pair --all      # speaker not in the list? show non-audio devices too
 ./bt.py forget [MAC]    # drop a pairing so it stops auto-reconnecting
 ./bt.py autoconnect on <MAC>   # the board keeps it connected by itself (see below)
 ./bt.py autoconnect off | status
 ```
 
-**`pair --diff`** is for a speaker you can't pick out of the list — a brandless one
-advertising a bare MAC, or a busy RF neighbourhood where a scan returns a dozen
-entries. It scans with the speaker **off** to take a baseline, scans again with it
-**on**, and offers only the difference. Usually that's exactly one device, so there's
-nothing to identify by eye.
+**`pair` lists audio devices only.** A scan in a normal room turns up ~25 entries and
+all but two or three are LE beacons — no name, so they print as their own MAC, at
+private addresses that change every scan. BlueZ tags real speakers with a Class of
+Device and an icon, so the list you get is the two or three that could actually play
+sound. If your speaker reports no class it won't be there: `--all` lifts the filter.
+
+If nothing at all reports itself as audio, the tool doesn't hide the list — it says
+so and shows everything, since that usually means the speaker isn't in pairing mode
+(most stop advertising a minute or two after you press the button).
+
+**`pair --diff`** is the older answer to the same problem, and mostly redundant now. It
+scans with the speaker **off** to take a baseline, scans again with it **on**, and offers
+only the difference. Note that LE devices rotate their addresses between scans, so on its
+own the diff reports them all as new — it needs the audio filter to be worth anything.
 
 If the diff comes back empty, the speaker was probably already in BlueZ's cache from
 an earlier scan — a cached device is in the baseline too, so the difference can't
