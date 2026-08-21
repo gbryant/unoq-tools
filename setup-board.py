@@ -7,8 +7,9 @@ permission before it changes anything. Idempotent: whatever is already done is r
 and skipped, so it's safe to re-run.
 
 A fresh stock image lands you as the `arduino` user over adb with ssh/avahi DISABLED, no Wi-Fi,
-and the account password EXPIRED (sudo blocked until it's reset). adb-over-USB is the only door
-until this runs. The current password value is not assumed — `passwd` asks you for it directly.
+and the account having NO password but already EXPIRED (sudo blocked until one is set).
+adb-over-USB is the only door until this runs. There is no stock password to look up: `passwd`
+asks for the current one and you press Enter (the image ships an empty hash in /etc/shadow).
 See the commander repo’s docs/getting-started-unoq.md for the full Uno Q track.
 """
 import getpass
@@ -113,7 +114,8 @@ def step_password():
     if not ask("  reset it now?"):
         print("  (skipped — nothing needing sudo can run until this is done)")
         return False
-    print("  passwd will prompt for the current password, then the new one twice:")
+    print("  passwd asks for the current password first — on a stock image it is EMPTY,")
+    print("  so just press Enter, then type the new password twice:")
     subprocess.run(["adb", "shell", "-t", "passwd"])
     if password_expired():
         print("  still expired — reset didn't complete (try again, or `adb shell -t passwd`)")
