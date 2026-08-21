@@ -39,9 +39,10 @@ reflash Debian.
 This is the part the reflash won't do. It restores the stock **BOOT0-pin / ROM-bootloader**
 boot mode that the standard Arduino App Lab DFU sketch-flash expects.
 
-**Easiest:** run the existing revert and answer `y` to the boot-byte prompt:
+**Easiest:** run the revert that ships with any commander-scaffolded Uno Q project
+(`cmdr init unoq` writes it) and answer `y` to the boot-byte prompt:
 ```
-cd ~/github/cmdr-unoq-test && ./restore-arduino        # 2nd half writes OPTR back to 0x1feff8aa
+cd <your-unoq-project> && ./restore-arduino        # 2nd half writes OPTR back to 0x1feff8aa
 ```
 (`restore-arduino` also disables our broker and unmasks the Arduino router — harmless to run
 even if you're about to wipe the eMMC anyway; if you're reflashing in Step 2, only its
