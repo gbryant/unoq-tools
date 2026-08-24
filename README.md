@@ -101,6 +101,12 @@ larger version of this problem (whole clips lost after 5 s idle).
 | `bt_autoconnect.py` | the board-side dial-out loop (`bt-autoconnect.service`) |
 | `volume.py` | report or set the default sink's volume |
 
+## The transport
+
+| Tool | What it does |
+|------|--------------|
+| `board.py` | not run directly — the module every other tool imports to reach the board. It picks adb or ssh from `UNOQ_HOST`, multiplexes ssh connections, timeout-bounds every call, and wraps commands in the session env (`XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS`) that a one-shot `adb shell` doesn't get. If you write your own tool against this board, import it rather than shelling out. |
+
 Run `setup-bt-audio.py` once per board — it installs the packages and applies the
 headless gotcha this whole thing exists for: with no active logind seat, WirePlumber
 won't start its bluez monitor, so a speaker connects but plays nothing.
@@ -151,7 +157,7 @@ until the speaker answers, then keeps checking — so it also handles switching 
 speaker on *after* the board, and re-links one that idle-drops.
 
 ```bash
-./bt.py autoconnect on 41:42:9D:48:82:BF
+./bt.py autoconnect on BC:87:FA:E2:D7:0D
 ./bt.py autoconnect                       # active/enabled + the MAC it's dialling
 adb shell 'journalctl --user -u bt-autoconnect -f'
 ```
