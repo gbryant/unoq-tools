@@ -2,7 +2,7 @@
 
 The Uno Q's Qualcomm QRB2210 runs full Debian (with a desktop). For a headless
 commander host you don't need the GUI or several stock daemons — trimming them frees
-RAM/CPU on the 2 GB board. This is the system-tuning companion to the commander repo’s `docs/unoq-access.md`
+RAM/CPU on the 2 GB board. This is the system-tuning companion to commander's [unoq-access.md](https://github.com/gbryant/commander/blob/main/docs/unoq-access.md)
 (which covers the access map + the commander console bridge). All commands assume the
 `arduino` user (in `sudo`); apply over `adb shell` or `ssh`.
 
@@ -50,12 +50,15 @@ symlink and `mv` the `.commander-bak` file back, then `daemon-reload`.)
 | `serial-getty@ttyMSM0`, `getty@tty1` | login consoles (debug UART / local) |
 | `commander-bridge` | the commander console over USB (`/dev/cu.usbmodem`) |
 
-## 4. Also part of the headless commander setup (see the commander repo’s docs/unoq-access.md)
+## 4. Also part of the headless commander setup
+
+Both of these are commander's side of the same job — full detail in its [unoq-access.md](https://github.com/gbryant/commander/blob/main/docs/unoq-access.md).
+
 - **Mask the Arduino router stack** (`arduino-router` + `-serial` + the `.path`) so it can't
   reclaim `ttyHS1` — `disable` is NOT enough (a `.path` trigger + `app-cli` `Wants` pull it
-  back). Full recipe + revert in the commander repo’s `docs/unoq-access.md`.
+  back). Full recipe + revert there.
 - **`commander-bridge.service`** = `socat /dev/ttyHS1 ↔ /dev/ttyGS0` → commander appears as
-  `/dev/cu.usbmodem` on the host. Also in the commander repo’s `docs/unoq-access.md`.
+  `/dev/cu.usbmodem` on the host.
 
 ## Notes
 - **`needrestart`** (the "Daemons using outdated libraries" screen after `apt upgrade`) only
