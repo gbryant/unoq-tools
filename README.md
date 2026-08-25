@@ -1,8 +1,9 @@
 # unoq-tools
 
 Host-side tools for the **Arduino Uno Q** (Qualcomm QRB2210 + STM32U585, Debian
-on the SBC side). Everything runs from your computer **over adb** — no
-keyboard/monitor on the board, no manual ssh setup first. Idempotent wizards
+on the SBC side). Everything runs from your computer — **over adb** on the bench,
+or **over ssh** once the board is deployed somewhere ([see below](#reaching-the-board--usb-or-network)).
+Either way: no keyboard/monitor on the board, no manual ssh setup first. Idempotent wizards
 show the current state, ask before changing anything, and are safe to re-run.
 
 These tools are board-generic: they don't require (or know about) any
