@@ -12,6 +12,11 @@ particular firmware on the M33. They pair well with the
 whose Uno Q track uses them for board bring-up and voice output — but stand
 alone.
 
+A sibling repo, [jetson-tools](https://github.com/gbryant/jetson-tools), is the
+same toolkit re-targeted at **NVIDIA Jetson** boards: ssh instead of adb, `pactl`
+instead of `wpctl`, and the listening half the Uno Q doesn't have room for —
+Whisper on TensorRT, a voice loop, and stereo CSI cameras.
+
 ## Board setup
 
 | Tool | What it does |
